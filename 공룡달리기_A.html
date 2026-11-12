@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>쥬라기 공룡 달리기</title>
+<style>
+  body { margin:0; min-height:100vh; background:#2b1a12; color:#fff3d6; font-family:"Malgun Gothic",sans-serif;
+         display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:12px; box-sizing:border-box; }
+  h1 { margin:0; font-size:1.5rem; }
+  #wrap { position:relative; width:100%; max-width:900px; }
+  canvas { width:100%; height:auto; display:block; border:4px solid #5a3a22; border-radius:8px; background:#f4c27a; }
+  #hud { position:absolute; top:10px; left:0; right:0; display:flex; justify-content:space-between; padding:0 16px;
+         font-weight:bold; font-size:1.2rem; color:#3b2212; text-shadow:0 1px 0 #fff8; pointer-events:none; }
+  #overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; }
+  #msg { font-size:1.8rem; font-weight:bold; color:#3b2212; text-shadow:0 1px 0 #fff8; }
+  button { font:bold 1.2rem "Malgun Gothic",sans-serif; padding:10px 28px; border:0; border-radius:8px; background:#d9531e; color:#fff; cursor:pointer; }
+  button:hover { background:#f06a30; }
+  p { margin:0; font-size:.95rem; opacity:.85; }
+  @media print { body { background:#fff; color:#000; } }
+</style>
+</head>
+<body>
+<h1>🦖 쥬라기 공룡 달리기</h1>
+<div id="wrap">
+  <canvas id="c" width="900" height="300"></canvas>
+  <div id="hud"><span>점수 <span id="score">0</span></span><span>최고 점수 <span id="hi">0</span></span></div>
+  <div id="overlay">
+    <div id="msg"></div>
+    <button id="btn">시작</button>
+  </div>
+</div>
+<p>스페이스바: 점프 · 🔥 불꽃 아이템을 먹으면 3초 무적!</p>
+
+<script>
+(() => {
+  const cv = document.getElementById('c'), g = cv.getContext('2d');
+  const W = 900, H = 300, GROUND = 250;
+  const $ = id => document.getElementById(id);
+  const KEY = 'jurassicDinoHighScore';
+
+  let hi = 0;
+  try { hi = parseInt(localStorage.getItem(KEY), 10) || 0; } catch (e) {}
+  $('hi').textContent = hi;
+
+  const dino = { x: 80, w: 44, h: 48, y: 0, vy: 0 }; // y: 땅에서 떠오른 높이
+  let state = 'idle'; // idle | play | over
+  let t, score, dist, obstacles, item, nextItemAt, invUntil, spawnIn, last, bgx, pops;
+
+  const speedAt = s => Math.min(900, 300 + Math.floor(s) * 12); // 1초마다 12px/s씩 빨라짐
+
+  function reset() {
+    t = 0; score = 0; dist = 0; obstacles = []; item = null; pops = [];
+    nextItemAt = 3 + Math.random() * 4; invUntil = -1; spawnIn = 0.8; bgx = 0;
+    dino.y = 0; dino.vy = 0;
+  }
+  reset();
+
+  function start() {
+    reset(); state = 'play'; $('overlay').style.display = 'none';
+    last = performance.now(); requestAnimationFrame(loop);
+  }
+  function gameOver() {
+    state = 'over'; saveHi();
+    $('msg').textContent = '게임 오버'; $('btn').textContent = '다시 시작';
+    $('overlay').style.display = 'flex';
+  }
+  function saveHi() { try { localStorage.setItem(KEY, hi); } catch (e) {} }
+
+  $('btn').addEventListener('click', e => { e.target.blur(); start(); });
+  addEventListener('keydown', e => {
+    if (e.code !== 'Space') return;
+    e.preventDefault();
+    if (state === 'play' && dino.y === 0) dino.vy = 800; // 땅에 있을 때만 점프
+  });
+  addEventListener('pagehide', saveHi);
+
+  function update(dt) {
+    t += dt;
+    const sp = speedAt(t);
+    dist += sp * dt;
+    score += dt * 10 + sp * dt / 20; // 시간 + 이동 거리
+    const s = Math.floor(score);
+    $('score').textContent = s;
+    if (s > hi) { hi = s; $('hi').textContent = hi; }
+    bgx += sp * dt;
+
+    // 점프 물리
+    if (dino.y > 0 || dino.vy > 0) {
+      dino.vy -= 2400 * dt; dino.y += dino.vy * dt;
+      if (dino.y <= 0) { dino.y = 0; dino.vy = 0; }
+    }
+
+    // 장애물 생성
+    spawnIn -= dt;
+    if (spawnIn <= 0) {
+      const rock = Math.random() < 0.4;
+      const w = rock ? 44 : 22 + Math.random() * 18, h = rock ? 28 : 40 + Math.random() * 24;
+      obstacles.push({ x: W + 20, w, h, rock, st: 'run', tm: 0, vx: 0, vy: 0, rot: 0, yo: 0 });
+      spawnIn = (0.9 + Math.random() * 1.1) * 330 / sp * 1.0 + 0.35; // 속도가 빨라질수록 간격(시간)을 줄임
+    }
+
+    // 불꽃 아이템 (한 번 나타난 뒤 최소 3초 후부터 무작위로 다시 등장)
+    if (!item && t >= nextItemAt && Math.random() < dt * 0.4) {
+      item = { x: W + 20, y: 85 + Math.random() * 25 };
+      nextItemAt = t + 3;
+    }
+    if (item) {
+      item.x -= sp * dt;
+      if (item.x < -30) item = null;
+      else if (Math.abs(item.x - (dino.x + dino.w / 2)) < 28 &&
+               Math.abs(item.y - (dino.y + dino.h / 2)) < 36) { invUntil = t + 3; item = null; }
+    }
+    const inv = t < invUntil;
+
+    // 장애물 이동 및 충돌
+    for (const o of obstacles) {
+      if (o.st === 'run') {
+        o.x -= sp * dt;
+        const hit = dino.x + 6 < o.x + o.w && dino.x + dino.w - 6 > o.x && dino.y < o.h - 4;
+        if (hit) {
+          if (inv) { o.st = 'pop'; o.tm = 0; }
+          else { gameOver(); return; }
+        }
+      } else if (o.st === 'pop') {
+        o.tm += dt; o.x -= sp * dt;
+        if (o.tm > 0.35) { o.st = 'fly'; o.vx = 700; o.vy = 900; }
+      } else {
+        o.x += o.vx * dt; o.yo += o.vy * dt; o.vy -= 1500 * dt; o.rot += 12 * dt;
+      }
+    }
+    obstacles = obstacles.filter(o => o.x > -80 && o.x < W + 100 && o.yo > -400 && o.yo < 700);
+  }
+
+  // ---------- 그리기 ----------
+  function drawBg() {
+    const sky = g.createLinearGradient(0, 0, 0, GROUND);
+    sky.addColorStop(0, '#f0a45a'); sky.addColorStop(1, '#fbe2a8');
+    g.fillStyle = sky; g.fillRect(0, 0, W, H);
+    g.fillStyle = '#fff1c4'; g.beginPath(); g.arc(760, 70, 34, 0, 7); g.fill(); // 해
+    // 화산 (느리게 이동)
+    const vx = 560 - (bgx * 0.05) % 1100 + 550;
+    for (const ox of [vx - 1100, vx]) {
+      g.fillStyle = '#6b3d2a'; g.beginPath(); g.moveTo(ox - 160, GROUND); g.lineTo(ox - 38, 90); g.lineTo(ox + 38, 90); g.lineTo(ox + 160, GROUND); g.fill();
+      g.fillStyle = '#ff6a1a'; g.beginPath(); g.moveTo(ox - 38, 90); g.lineTo(ox + 38, 90); g.lineTo(ox + 18, 104); g.lineTo(ox, 96); g.lineTo(ox - 20, 106); g.fill();
+      g.fillStyle = 'rgba(80,60,50,.45)';
+      for (let i = 0; i < 4; i++) { g.beginPath(); g.arc(ox + 6 + i * 10, 74 - i * 18, 14 + i * 5, 0, 7); g.fill(); }
+    }
+    // 먼 산
+    g.fillStyle = '#a5683e';
+    const mo = -(bgx * 0.1) % 300;
+    for (let i = -1; i < 5; i++) { const x = mo + i * 300; g.beginPath(); g.moveTo(x, GROUND); g.lineTo(x + 130, 175); g.lineTo(x + 300, GROUND); g.fill(); }
+    // 땅
+    g.fillStyle = '#7a4a28'; g.fillRect(0, GROUND, W, H - GROUND);
+    g.fillStyle = '#4f7a2a'; g.fillRect(0, GROUND, W, 8);
+    g.fillStyle = '#5c3a1e';
+    const go = -(bgx % 60);
+    for (let x = go; x < W; x += 60) g.fillRect(x, GROUND + 22, 22, 4);
+    // 양치식물
+    const fo = -(bgx * 0.6) % 220;
+    for (let i = -1; i < 5; i++) fern(fo + i * 220 + 40, GROUND);
+  }
+  function fern(x, y) {
+    g.strokeStyle = '#2f6b2a'; g.lineWidth = 3;
+    for (let a = -1.2; a <= 1.2; a += 0.4) {
+      g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + Math.sin(a) * 20, y - 20, x + Math.sin(a) * 38, y - 34 + Math.abs(a) * 10); g.stroke();
+    }
+  }
+  function drawDino() {
+    const x = dino.x, y = GROUND - dino.y - dino.h;
+    g.fillStyle = '#3a8a3a';
+    g.fillRect(x + 4, y + 18, 28, 20);       // 몸통
+    g.fillRect(x - 6, y + 22, 12, 8);        // 꼬리
+    g.fillRect(x - 12, y + 26, 8, 6);
+    g.fillRect(x + 24, y, 20, 18);           // 머리
+    g.fillRect(x + 28, y + 14, 16, 6);       // 턱
+    g.fillRect(x + 28, y + 18, 4, 8);        // 팔
+    g.fillStyle = '#fff'; g.fillRect(x + 34, y + 4, 6, 6);
+    g.fillStyle = '#000'; g.fillRect(x + 37, y + 6, 3, 3);
+    g.fillStyle = '#2c6b2c';
+    const step = dino.y > 0 ? 0 : Math.floor(t * 12) % 2;
+    g.fillRect(x + 8, y + 38, 8, step ? 10 : 6);
+    g.fillRect(x + 20, y + 38, 8, step ? 6 : 10);
+    if (state === 'play' && t < invUntil) { // 불꽃 효과
+      const cx = x + 22, cy = y + 26, f = performance.now() / 80;
+      g.fillStyle = 'rgba(255,120,20,.5)';
+      for (let i = 0; i < 9; i++) {
+        const a = i / 9 * 6.283 + f * 0.3, r = 36 + Math.sin(f + i * 2) * 6;
+        g.beginPath(); g.arc(cx + Math.cos(a) * r * 0.85, cy + Math.sin(a) * r, 9, 0, 7); g.fill();
+      }
+      g.strokeStyle = 'rgba(255,220,60,.9)'; g.lineWidth = 3;
+      g.beginPath(); g.ellipse(cx, cy, 32, 38, 0, 0, 7); g.stroke();
+    }
+  }
+  function drawObstacle(o) {
+    g.save();
+    if (o.st === 'fly') {
+      g.translate(o.x + o.w / 2, GROUND - o.h / 2 - o.yo); g.rotate(o.rot); g.translate(-o.w / 2, o.h / 2 - o.h);
+      body(0, o.h, o); g.restore(); return;
+    }
+    if (o.st === 'pop') {
+      const k = o.tm / 0.35, cx = o.x + o.w / 2, cy = GROUND - o.h / 2, r = 14 + k * 34;
+      g.fillStyle = '#ffd23a'; g.beginPath();
+      for (let i = 0; i < 16; i++) { const a = i * Math.PI / 8, rr = i % 2 ? r * 0.6 : r; g.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr); }
+      g.fill();
+      g.fillStyle = '#c0301a'; g.font = 'bold 20px "Malgun Gothic"'; g.textAlign = 'center'; g.fillText('펑!', cx, cy + 7);
+      g.restore(); return;
+    }
+    body(o.x, 0, o); g.restore();
+  }
+  function body(x, yTop, o) {
+    const top = yTop || GROUND - o.h, left = yTop ? 0 : x;
+    if (o.rock) {
+      g.fillStyle = '#8a8a92'; g.beginPath(); g.moveTo(left, top + o.h); g.lineTo(left + 8, top + 6); g.lineTo(left + o.w * 0.5, top);
+      g.lineTo(left + o.w - 6, top + 8); g.lineTo(left + o.w, top + o.h); g.fill();
+      g.fillStyle = '#6a6a72'; g.fillRect(left + 10, top + 12, 10, 4);
+    } else {
+      g.fillStyle = '#2f7a35'; const cw = o.w * 0.42, cxm = left + (o.w - cw) / 2;
+      g.fillRect(cxm, top, cw, o.h);
+      g.fillRect(left, top + o.h * 0.35, o.w * 0.3, 6); g.fillRect(left, top + o.h * 0.2, 6, o.h * 0.2);
+      g.fillRect(left + o.w * 0.7, top + o.h * 0.5, o.w * 0.3, 6); g.fillRect(left + o.w - 6, top + o.h * 0.32, 6, o.h * 0.22);
+    }
+  }
+  function drawItem() {
+    if (!item) return;
+    g.fillStyle = '#ff5a14'; g.beginPath(); g.moveTo(item.x, item.y - 18);
+    g.quadraticCurveTo(item.x + 18, item.y - 2, item.x + 10, item.y + 14);
+    g.quadraticCurveTo(item.x, item.y + 20, item.x - 10, item.y + 14);
+    g.quadraticCurveTo(item.x - 18, item.y - 2, item.x, item.y - 18); g.fill();
+    g.fillStyle = '#ffd23a'; g.beginPath(); g.ellipse(item.x, item.y + 8, 6, 9, 0, 0, 7); g.fill();
+  }
+  function draw() {
+    g.textAlign = 'left';
+    drawBg(); drawItem(); obstacles.forEach(drawObstacle); drawDino();
+  }
+
+  function loop(now) {
+    if (state !== 'play') { draw(); return; }
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    update(dt);
+    draw();
+    if (state === 'play') requestAnimationFrame(loop);
+  }
+
+  $('msg').textContent = '쥬라기 공룡 달리기';
+  draw();
+})();
+</script>
+</body>
+</html>
